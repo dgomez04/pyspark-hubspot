@@ -2,6 +2,7 @@ from pyspark.sql.datasource import DataSource, DataSourceReader
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType, TimestampType
 from urllib.parse import urlencode
 import requests
+from .schemas import SCHEMA_MAPPING
 
 class HubspotDataSource(DataSource):
     """
@@ -23,28 +24,33 @@ class HubspotDataSource(DataSource):
     
     def schema(self): 
         object_type = self.options.get("object_type")
+        if not object_type:
+            raise ValueError("object_type is required")
+        
+        if object_type not in SCHEMA_MAPPING:
+            raise ValueError(f"Unsupported object_type: {object_type}. Must be one of: {', '.join(SCHEMA_MAPPING.keys())}")
+        
         properties = self.options.get("properties")
         return self._build_schema(object_type, properties)
     
     def reader(self, schema: StructType):
-        return HubspotReader(self.options, schema)
+        return HubspotReader(schema, self.options)
     
     def _build_schema(self, object_type: str, properties: str) -> StructType:
-        fields = [
-            StructField("id", StringType(), True),
-            StructField("archived", BooleanType(), True),
-            StructField("createdAt", TimestampType(), True),
-            StructField("updatedAt", TimestampType(), True),
-        ]
-
-        if properties and properties.lower != "all":
-            for prop in properties.split(","):
-                fields.append(StructField(prop, StringType(), True))
+        base_schema = SCHEMA_MAPPING[object_type]
+        fields = list(base_schema.fields)
+        
+        if properties and properties.lower() != "all":
+            custom_props = [p.strip() for p in properties.split(",")]
+            existing_fields = {f.name for f in fields}
+            for prop in custom_props:
+                if prop not in existing_fields:
+                    fields.append(StructField(prop, StringType(), True))
         
         return StructType(fields)
 
 class HubspotReader(DataSourceReader):
-    def __init__(self, options: dict, schema: StructType):
+    def __init__(self, schema, options):
         self.schema = schema
         self.options = options
         self.api_key = options.get("api_key")
@@ -73,7 +79,7 @@ class HubspotReader(DataSourceReader):
         if self.associations:
             params["associations"] = [a.strip() for a in self.associations.split(",")]
 
-        after = None;
+        after = None
 
         while True:
             request_url = url + urlencode(params, doseq=True)
@@ -93,6 +99,7 @@ class HubspotReader(DataSourceReader):
                     "updatedAt": obj.get("updatedAt"),
                 }
 
+                # Add properties from the response
                 for k, v in obj.get("properties", {}).items():
                     row[k] = v
                 
