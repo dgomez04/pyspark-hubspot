@@ -2,6 +2,7 @@ from pyspark.sql.datasource import DataSource, DataSourceReader
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType, TimestampType
 from urllib.parse import urlencode
 import requests
+from datetime import datetime
 from .schemas import SCHEMA_MAPPING
 
 class HubspotDataSource(DataSource):
@@ -60,11 +61,11 @@ class HubspotReader(DataSourceReader):
         self.limit = options.get("limit", 100)
         self.archived = options.get("archived", "false")
 
-    def read(self):
+    def read(self, partition=None):
         return self._read_data()
     
     def _read_data(self):
-        url = f"https://api.hubapi.com/crm/v3/objects/{self.object_type}"
+        base_url = f"https://api.hubapi.com/crm/v3/objects/{self.object_type}"
         
         headers = { "Authorization": f"Bearer {self.api_key}" }
 
@@ -82,9 +83,12 @@ class HubspotReader(DataSourceReader):
         after = None
 
         while True:
-            request_url = url + urlencode(params, doseq=True)
+            query_string = urlencode(params, doseq=True)
+            request_url = f"{base_url}?{query_string}"
+            
             if after:
                 request_url += f"&after={after}"
+                
             response = requests.get(request_url, headers=headers)
             response.raise_for_status()
             data = response.json()
@@ -95,12 +99,16 @@ class HubspotReader(DataSourceReader):
                 row = {
                     "id": obj.get("id"),
                     "archived": obj.get("archived"),
-                    "createdAt": obj.get("createdAt"),
-                    "updatedAt": obj.get("updatedAt"),
+                    "createdAt": datetime.fromisoformat(obj.get("createdAt").replace("Z", "+00:00")) if obj.get("createdAt") else None,
+                    "updatedAt": datetime.fromisoformat(obj.get("updatedAt").replace("Z", "+00:00")) if obj.get("updatedAt") else None,
                 }
 
-                # Add properties from the response
                 for k, v in obj.get("properties", {}).items():
+                    if isinstance(v, str) and v.endswith("Z"):
+                        try:
+                            v = datetime.fromisoformat(v.replace("Z", "+00:00"))
+                        except ValueError:
+                            pass
                     row[k] = v
                 
                 yield tuple(row.get(f.name, None) for f in self.schema.fields)
